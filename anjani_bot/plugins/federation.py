@@ -17,7 +17,9 @@
 import asyncio
 import logging
 import time
+import os
 from typing import Union
+from datetime import datetime
 
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -84,7 +86,12 @@ class FedBase(plugin.Plugin):
             {f'banned.{user_id}': { '$exists' : True }})
         return self.feds_db.find(
             {f'banned.{user_id}': {"$exists": True}},
-            projection={f'banned.{user_id}': 1, 'name': 1}) if doc else False
+            projection={f'banned.{user_id}': 1, 'name': 1, 'chats': 1}) if doc else False
+
+    @staticmethod
+    def parse_date(timestamp: float) -> str:
+        """get a date format from a timestamp"""
+        return datetime.fromtimestamp(timestamp).strftime("%Y %b %d %H:%M UTC")
 
 
 class Federation(FedBase):
@@ -214,15 +221,13 @@ class Federation(FedBase):
             check = await self.get_fed(fid)
             if not check:
                 return await message.reply_text("Please enter a valid federation ID")
-            if chat_id != check.get("chats"):
+            if chat_id not in check.get("chats"):
                 return await message.reply_text(
                     "This chat isn't connected to that federation!")
 
             async with self.lock:
                 await self.feds_db.update_one(
                     {'_id': fid}, {"$pull": {'chats': chat_id}})
-            async with self.lock:
-                await self
             await message.reply_text(
                 f"This chat has left the **{check['name']}** Federation!"
             )
@@ -295,10 +300,9 @@ class Federation(FedBase):
             text = "Can't find federation with that ID"
         else:
             fdata = await self.get_fed_bychat(chat_id)
-            text = "This chat is not in any federation!"
 
         if not fdata:
-            return await message.reply_text(text)
+            return await message.reply_text("This chat is not in any federation!")
 
         owner = await extract_user(self.bot.client, fdata["owner"])
 
@@ -448,18 +452,76 @@ class Federation(FedBase):
     @listener.on(["fedstats", "fstats"])
     async def fed_stats(self, message):
         """Get user status"""
-        user_id, _ = extract_user_and_text(message)
         # chat_id = message.chat.id
-
-        user = (await extract_user(self.bot.client, user_id))
+        user_id, _ = extract_user_and_text(message)
         if isinstance(user_id, str):
-            user_id = user.id
-        data = await self.check_fban(user_id)
+            user_id = (await extract_user(self.bot.client, user_id)).id
+        if not user_id:
+            user_id = message.from_user.id
+
+        # <user_Id> <fed_id>
+        if len(message.command) == 2 and message.command[0].isdigit():
+            fid = message.command[1]
+            data = await self.get_fed(fid)
+            if not data:
+                return await message.reply_text("Can't find federation with that ID")
+            if message.command[0] in data.get("banned", {}):
+                res = data['banned'][str(message.command[0])]
+                await message.reply_text(
+                    "User is banned in that federation\n"
+                    f"**Reason: **{res['reason']}\n"
+                    f"**Banned on: **{self.parse_date(res['time'])}")
+            else:
+                return await message.reply_text("User is not banned in that federation!")
+
+        # <user_Id>
+        else:
+            data = await self.check_fban(user_id)
+            if data:
+                text = "This user has been banned in this federations\n"
+                async for bans in data:
+                    text += f" -  **{bans['name']}**(`{bans['_id']}`)\n"
+                    text += f"    **Reason: **{bans['banned'][str(user_id)]['reason']}\n"
+            else:
+                text = "This user is not banned in any federation!"
+            await message.reply_text(text)
+
+    @listener.on("fbackup", filters.private)
+    async def backup_fedband(self, message):
+        """Backup federation ban list"""
+        if not message.command:
+            return await message.reply_text("Give me a Fed ID to backup")
+
+        data = await self.get_fed(message.command[0])
         if not data:
+            return await message.reply_text("Invalid Fed ID!")
+        if message.from_user.id != data["owner"]:
+            return await message.reply_text("Only federation owner can do this!")
+
+        banned_list = data["banned"]
+        file_name = f"{self.bot.get_config.download_path}/{data['name']}.csv"
+        with open(file_name, "w") as file:
+            for user in banned_list:
+                ban_data = banned_list[str(user)]
+                file.writelines(
+                    f"{user},{ban_data['name']},{ban_data['reason']},{ban_data['time']}")
+
+        await message.reply_document(file_name)
+        os.remove(file_name)
+
+    # @listener.on("fexport", filters.private)
+    async def restore_fban(self, message):
+        """Restore a backup bans"""
+        chat_id = message.chat.id
+        if not (message.reply_to_message and message.reply_to_message.document):
             return await message.reply_text(
-                f"{user.first_name} is not banned in any federations")
-        text = f"{user.first_name} has been banned in this federation\n"
-        async for bans in data:
-            text += f" - **{bans['name']}**(`{bans['_id']}`)\n"
-            text += f"   **reason: **{bans['banned'][str(user_id)]['reason']}\n"
-        await message.reply_text(text)
+                await self.bot.text(chat_id, "no-backup-file")
+            )
+        file = await message.reply_to_message.download(self.bot.get_config.download_path)
+        fid = message.command[0]
+        with open(file, "r") as buff:
+            for line in buff:
+                data = line.split(",")
+                await self.fban_user(fid, data[0], data[1], data[2], True)
+        await message.reply_text("Restore done")
+        os.remove(file)
