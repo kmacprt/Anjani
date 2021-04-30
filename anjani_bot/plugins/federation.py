@@ -259,7 +259,7 @@ class Federation(FedBase):
         async with self.lock:
             await self.feds_db.update_one(
                 {'_id': fed_data['_id']},
-                {'$push': {'admins': user_id}})
+                {'$push': {'admins': to_promote}})
         await message.reply_text("succesfully fpromoted!")
 
     @listener.on(["fdemote", "feddemote"])
@@ -288,7 +288,7 @@ class Federation(FedBase):
 
         async with self.lock:
             await self.feds_db.update_one(
-                {'_id': fed_data['_id']}, {'$pull': {'admins': user_id}})
+                {'_id': fed_data['_id']}, {'$pull': {'admins': to_demote}})
         await message.reply_text("succesfully fdemoted!")
 
     @listener.on("fedinfo")
