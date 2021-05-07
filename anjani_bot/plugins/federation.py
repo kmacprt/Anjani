@@ -64,11 +64,11 @@ class FedBase(plugin.Plugin):
         """Get fed data"""
         return await self.feds_db.find_one({'_id': fid})
 
-    async def fban_user(self, fid, user_id, user=None, reason=None, ban: bool=True):
+    async def fban_user(self, fid, user_id, fullname=None, reason=None, ban: bool=True):
         """Remove or Add banned user"""
         if ban:
             action = "$set"
-            data = {"name": user.fullname,
+            data = {"name": fullname,
                     "reason": reason,
                     "time": time.time()}
         else:
@@ -381,7 +381,7 @@ class Federation(FedBase):
             update = True
 
         banned_user = ParsedChatMember(user)
-        await self.fban_user(fed_data["_id"], user_id, banned_user, reason, True)
+        await self.fban_user(fed_data["_id"], user_id, banned_user.fullname, reason, True)
         if update:
             text = (
                 "**New Federation Ban**\n"
@@ -433,7 +433,7 @@ class Federation(FedBase):
         if str(user.id) not in fed_data.get('banned').keys():
             return await message.reply_text("This user is not fbanned!")
 
-        await self.fban_user(fed_data['_id'], user.id, ParsedChatMember(user), ban=False)
+        await self.fban_user(fed_data['_id'], user.id, ParsedChatMember(user).fullname, ban=False)
 
         text = (
             "**Un-FedBan**\n"
@@ -499,7 +499,8 @@ class Federation(FedBase):
             return await message.reply_text("Only federation owner can do this!")
 
         banned_list = data["banned"]
-        file_name = f"{self.bot.get_config.download_path}/{data['name']}.csv"
+        file_name = f"{self.bot.get_config.download_path}{data['name']}.csv"
+        print(file_name)
         with open(file_name, "w") as file:
             for user in banned_list:
                 ban_data = banned_list[str(user)]
@@ -509,7 +510,7 @@ class Federation(FedBase):
         await message.reply_document(file_name)
         os.remove(file_name)
 
-    # @listener.on("fexport", filters.private)
+    @listener.on("fexport", filters.private)
     async def restore_fban(self, message):
         """Restore a backup bans"""
         chat_id = message.chat.id
@@ -517,8 +518,14 @@ class Federation(FedBase):
             return await message.reply_text(
                 await self.bot.text(chat_id, "no-backup-file")
             )
-        file = await message.reply_to_message.download(self.bot.get_config.download_path)
+        if not message.command:
+            return await message.reply_text("Give me a Fed ID to backup")
         fid = message.command[0]
+        data = await self.get_fed(fid)
+        if not data:
+            return await message.reply_text("Invalid Fed ID!")
+
+        file = await message.reply_to_message.download(self.bot.get_config.download_path)
         with open(file, "r") as buff:
             for line in buff:
                 data = line.split(",")
